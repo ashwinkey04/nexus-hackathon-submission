@@ -50,6 +50,10 @@ class _NexusHomePageState extends State<NexusHomePage> {
   DatabaseStats? dbStats;
   List<Document> recentDocuments = [];
 
+  // Processing steps tracking
+  final List<ProcessingStep> _processingSteps = [];
+  bool _showProcessingSteps = true;
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +70,16 @@ class _NexusHomePageState extends State<NexusHomePage> {
   }
 
   // --- RAG LOGIC STARTS HERE ---
+
+  void _addProcessingStep(String step, {String? detail}) {
+    setState(() {
+      _processingSteps.add(ProcessingStep(
+        step: step,
+        detail: detail,
+        timestamp: DateTime.now(),
+      ));
+    });
+  }
 
   Future<void> _startInitializationSequence() async {
     await downloadModel();
@@ -189,7 +203,10 @@ class _NexusHomePageState extends State<NexusHomePage> {
       setState(() {
         isBusy = true;
         statusMessage = 'Adding document...';
+        _processingSteps.clear();
       });
+
+      _addProcessingStep('📂 Opening file picker...');
 
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
@@ -201,9 +218,19 @@ class _NexusHomePageState extends State<NexusHomePage> {
         String fileName = result.files.single.name;
         String extension = result.files.single.extension ?? 'txt';
 
+        _addProcessingStep(
+          '✅ File selected: $fileName',
+          detail:
+              'Size: ${(result.files.single.size / 1024).toStringAsFixed(1)} KB',
+        );
+
+        _addProcessingStep('📖 Reading file content...');
+        final stopwatch = Stopwatch()..start();
         String text = await _getFileContent(filePath, extension);
+        stopwatch.stop();
 
         if (text.isEmpty) {
+          _addProcessingStep('❌ Failed to extract text from file');
           if (mounted)
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                 content: Text('Could not extract text from file')));
@@ -214,24 +241,64 @@ class _NexusHomePageState extends State<NexusHomePage> {
           return;
         }
 
+        _addProcessingStep(
+          '✅ Content extracted',
+          detail:
+              '${text.length} characters in ${stopwatch.elapsedMilliseconds}ms',
+        );
+
+        // Calculate estimated chunks
+        final chunkSize = 500; // Default chunk size
+        final estimatedChunks = (text.length / chunkSize).ceil();
+
+        _addProcessingStep(
+          '🔪 Chunking document...',
+          detail:
+              'Creating ~$estimatedChunks chunks (${chunkSize}chars each, 50char overlap)',
+        );
+
+        _addProcessingStep(
+          '🧮 Generating embeddings...',
+          detail: 'Using qwen3-0.6-embed model (1024 dimensions)',
+        );
+
+        final embeddingStopwatch = Stopwatch()..start();
         final document = await rag.storeDocument(
           fileName: fileName,
           filePath: filePath,
           content: text,
           fileSize: result.files.single.size,
         );
+        embeddingStopwatch.stop();
+
+        _addProcessingStep(
+          '✅ Embeddings generated',
+          detail: '~$estimatedChunks embeddings created',
+        );
+
+        _addProcessingStep(
+          '💾 Stored in vector database',
+          detail:
+              'Document ID: ${document.id} • Total: ${(embeddingStopwatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s',
+        );
 
         debugPrint('Stored doc: ${document.id}');
+
+        _addProcessingStep('📊 Updating database statistics...');
         await getDBStats();
+        _addProcessingStep('✅ Complete!');
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Added $fileName')),
           );
         }
+      } else {
+        _addProcessingStep('ℹ️ File selection cancelled');
       }
     } catch (e) {
       debugPrint('Error adding doc: $e');
+      _addProcessingStep('❌ Error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -342,13 +409,17 @@ class _NexusHomePageState extends State<NexusHomePage> {
       setState(() {
         isBusy = true;
         statusMessage = 'Checking existing data...';
+        _processingSteps.clear();
       });
+
+      _addProcessingStep('🔍 Checking for existing demo data...');
 
       // Check if demo data already exists
       if (!forceReload) {
         final exists = await _checkIfDemoDataExists();
         if (exists) {
           debugPrint('[NexusHome] Demo data already exists, skipping load');
+          _addProcessingStep('ℹ️ Demo data already loaded');
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -363,24 +434,32 @@ class _NexusHomePageState extends State<NexusHomePage> {
           });
           return;
         }
+        _addProcessingStep('✅ No existing demo data found');
       } else {
         debugPrint(
             '[NexusHome] Force reload requested, clearing existing demo data...');
+        _addProcessingStep('🗑️ Clearing existing demo data...');
         // Clear existing demo data
         final allDocs = await rag.getAllDocuments();
         final demoDocs =
             allDocs.where((doc) => doc.filePath.startsWith('demo_data/'));
+        int cleared = 0;
         for (final doc in demoDocs) {
           await rag.deleteDocument(doc.id);
+          cleared++;
           debugPrint(
               '[NexusHome] Deleted existing demo document: ${doc.fileName}');
         }
+        _addProcessingStep(
+          '✅ Cleared $cleared existing documents',
+        );
       }
 
       setState(() {
         statusMessage = 'Loading demo data...';
       });
 
+      _addProcessingStep('🌐 Fetching LinkedIn posts from API...');
       debugPrint('[NexusHome] Fetching demo data from API...');
       final stopwatch = Stopwatch()..start();
       final posts = await demoDataService.fetchDemoData();
@@ -388,12 +467,32 @@ class _NexusHomePageState extends State<NexusHomePage> {
       debugPrint(
           '[NexusHome] Fetched ${posts.length} posts in ${stopwatch.elapsedMilliseconds}ms');
 
+      _addProcessingStep(
+        '✅ Fetched ${posts.length} LinkedIn posts',
+        detail:
+            'Retrieved in ${(stopwatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s',
+      );
+
       int successCount = 0;
       int failureCount = 0;
 
       debugPrint(
           '[NexusHome] Starting to store ${posts.length} posts in RAG database...');
+      _addProcessingStep('💾 Processing posts for embedding...');
       final storeStopwatch = Stopwatch()..start();
+
+      // Calculate total estimated chunks for all posts
+      final chunkSize = 500;
+      int totalEstimatedChunks = 0;
+      for (final post in posts) {
+        final content = post.toSearchableContent();
+        totalEstimatedChunks += (content.length / chunkSize).ceil();
+      }
+
+      _addProcessingStep(
+        '  ℹ️ Estimated ~$totalEstimatedChunks total chunks',
+        detail: 'Across ${posts.length} posts • ${chunkSize}chars per chunk',
+      );
 
       for (int i = 0; i < posts.length; i++) {
         final post = posts[i];
@@ -401,8 +500,9 @@ class _NexusHomePageState extends State<NexusHomePage> {
           debugPrint(
               '[NexusHome] Processing post ${i + 1}/${posts.length}: ${post.displayName}');
           final content = post.toSearchableContent();
+          final estimatedChunks = (content.length / chunkSize).ceil();
           debugPrint(
-              '[NexusHome]   - Content length: ${content.length} characters');
+              '[NexusHome]   - Content length: ${content.length} characters (~$estimatedChunks chunks)');
 
           final doc = await rag.storeDocument(
             fileName: post.displayName,
@@ -414,6 +514,12 @@ class _NexusHomePageState extends State<NexusHomePage> {
           debugPrint(
               '[NexusHome]   - Successfully stored document ID: ${doc.id}');
           successCount++;
+
+          // Show each post with chunk count
+          _addProcessingStep(
+            '  📄 ${i + 1}/${posts.length}: ${post.displayName}',
+            detail: '~$estimatedChunks chunks embedded • Doc ID: ${doc.id}',
+          );
         } catch (e, stackTrace) {
           debugPrint(
               '[NexusHome] ERROR storing post ${i + 1} (${post.url}): $e');
@@ -428,10 +534,27 @@ class _NexusHomePageState extends State<NexusHomePage> {
       debugPrint(
           '[NexusHome] Total storage time: ${storeStopwatch.elapsedMilliseconds}ms');
 
+      _addProcessingStep(
+        '✅ All embeddings generated',
+        detail: '~$totalEstimatedChunks embeddings created (1024 dims each)',
+      );
+
+      _addProcessingStep(
+        '📊 Statistics',
+        detail:
+            '$successCount successful, $failureCount failed • ${(storeStopwatch.elapsedMilliseconds / 1000).toStringAsFixed(1)}s total',
+      );
+
       debugPrint('[NexusHome] Updating database statistics...');
+      _addProcessingStep('📊 Updating database statistics...');
       await getDBStats();
       debugPrint(
           '[NexusHome] Database stats updated: ${dbStats?.totalDocuments} total documents');
+
+      _addProcessingStep(
+        '✅ Complete!',
+        detail: 'Total documents: ${dbStats?.totalDocuments}',
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -450,6 +573,7 @@ class _NexusHomePageState extends State<NexusHomePage> {
     } catch (e, stackTrace) {
       debugPrint('[NexusHome] ERROR loading demo data: $e');
       debugPrint('[NexusHome] Stack trace: $stackTrace');
+      _addProcessingStep('❌ Error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error loading demo data: $e')),
@@ -573,6 +697,10 @@ class _NexusHomePageState extends State<NexusHomePage> {
                 onManageTap: _showManageKnowledgeSheet,
               ),
               const SizedBox(height: 30),
+              if (_processingSteps.isNotEmpty) ...[
+                _buildProcessingSteps(),
+                const SizedBox(height: 20),
+              ],
               Expanded(
                 child: NexusRecentActivity(
                   dbStats: dbStats,
@@ -643,4 +771,115 @@ class _NexusHomePageState extends State<NexusHomePage> {
       ),
     );
   }
+
+  Widget _buildProcessingSteps() {
+    return Container(
+      decoration: BoxDecoration(
+        color: _cardDark,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _accentGreen.withOpacity(0.3),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            onTap: () {
+              setState(() {
+                _showProcessingSteps = !_showProcessingSteps;
+              });
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  Icon(
+                    _showProcessingSteps
+                        ? Icons.expand_less
+                        : Icons.expand_more,
+                    color: _accentGreen,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Processing Steps',
+                    style: TextStyle(
+                      color: _accentGreen,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (isBusy)
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(_accentGreen),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (_showProcessingSteps) ...[
+            const Divider(
+              color: Color(0xFF2A2A2A),
+              height: 1,
+            ),
+            Container(
+              constraints: const BoxConstraints(maxHeight: 200),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: _processingSteps.map((step) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            step.step,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                            ),
+                          ),
+                          if (step.detail != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              step.detail!,
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.6),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class ProcessingStep {
+  final String step;
+  final String? detail;
+  final DateTime timestamp;
+
+  ProcessingStep({
+    required this.step,
+    this.detail,
+    required this.timestamp,
+  });
 }

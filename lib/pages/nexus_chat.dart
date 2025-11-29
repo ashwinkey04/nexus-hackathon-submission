@@ -1,5 +1,6 @@
 import 'package:cactus/cactus.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class NexusChatPage extends StatefulWidget {
   final CactusLM lm;
@@ -30,10 +31,85 @@ class _NexusChatPageState extends State<NexusChatPage> {
   final List<ProcessingStep> _processingSteps = [];
   bool _showProcessingSteps = true;
 
+  // Model management
+  List<CactusModel> availableModels = [];
+  bool isDownloadingModel = false;
+  String downloadStatus = '';
+  double? downloadProgress;
+  Set<String> downloadedModels = {};
+  StateSetter? _modalStateSetter;
+
   @override
   void initState() {
     super.initState();
-    _initializeChatModel();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    await _loadSavedModel();
+    await _fetchAvailableModels();
+    await _checkDownloadedModels();
+    await _initializeChatModel();
+  }
+
+  Future<void> _loadSavedModel() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedModel = prefs.getString('last_chat_model');
+    if (savedModel != null) {
+      setState(() {
+        chatModel = savedModel;
+      });
+      debugPrint('[NexusChat] Loaded saved model preference: $savedModel');
+    }
+  }
+
+  Future<void> _saveModelPreference(String model) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_chat_model', model);
+    debugPrint('[NexusChat] Saved model preference: $model');
+  }
+
+  Future<void> _fetchAvailableModels() async {
+    try {
+      final models = await widget.lm.getModels();
+      debugPrint('[NexusChat] Fetched ${models.length} available models');
+      setState(() {
+        availableModels = models;
+      });
+      // Also update the modal if it's open
+      if (_modalStateSetter != null) {
+        _modalStateSetter!(() {
+          availableModels = models;
+        });
+      }
+    } catch (e) {
+      debugPrint('[NexusChat] Error fetching models: $e');
+    }
+  }
+
+  Future<void> _checkDownloadedModels() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final downloaded = prefs.getStringList('downloaded_models') ?? [];
+      setState(() {
+        downloadedModels = Set.from(downloaded);
+      });
+      debugPrint(
+          '[NexusChat] Downloaded models from prefs: ${downloadedModels.join(', ')}');
+    } catch (e) {
+      debugPrint('[NexusChat] Error loading downloaded models: $e');
+    }
+  }
+
+  Future<void> _saveDownloadedModel(String model) async {
+    try {
+      downloadedModels.add(model);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('downloaded_models', downloadedModels.toList());
+      debugPrint('[NexusChat] Saved downloaded model: $model');
+    } catch (e) {
+      debugPrint('[NexusChat] Error saving downloaded model: $e');
+    }
   }
 
   @override
@@ -46,6 +122,15 @@ class _NexusChatPageState extends State<NexusChatPage> {
   Future<void> _initializeChatModel() async {
     debugPrint('[NexusChat] _initializeChatModel() called');
     debugPrint('[NexusChat] Target chat model: $chatModel');
+
+    // Check if model is downloaded
+    if (!downloadedModels.contains(chatModel)) {
+      debugPrint('[NexusChat] Model not downloaded: $chatModel');
+      setState(() {
+        isLoadingChatModel = false;
+      });
+      return;
+    }
 
     setState(() {
       isLoadingChatModel = true;
@@ -84,6 +169,438 @@ class _NexusChatPageState extends State<NexusChatPage> {
       });
       debugPrint('[NexusChat] _initializeChatModel() finished');
     }
+  }
+
+  Future<void> _downloadModel(String model, StateSetter setModalState) async {
+    setState(() {
+      isDownloadingModel = true;
+      downloadStatus = 'Preparing download...';
+      downloadProgress = null;
+    });
+    setModalState(() {
+      isDownloadingModel = true;
+      downloadStatus = 'Preparing download...';
+      downloadProgress = null;
+    });
+
+    try {
+      await widget.lm.downloadModel(
+        model: model,
+        downloadProcessCallback: (progress, status, isError) {
+          setState(() {
+            if (isError) {
+              downloadStatus = 'Error: $status';
+            } else {
+              downloadStatus = status;
+              downloadProgress = progress;
+            }
+          });
+          setModalState(() {
+            if (isError) {
+              downloadStatus = 'Error: $status';
+            } else {
+              downloadStatus = status;
+              downloadProgress = progress;
+            }
+          });
+        },
+      );
+
+      setState(() {
+        downloadedModels.add(model);
+        downloadStatus = 'Download complete!';
+      });
+      setModalState(() {
+        downloadedModels.add(model);
+        downloadStatus = 'Download complete!';
+      });
+
+      // Save to SharedPreferences
+      await _saveDownloadedModel(model);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Model downloaded successfully!'),
+            backgroundColor: Color(0xFF8CFF9E),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+
+      // Auto-initialize if this is the selected model
+      if (model == chatModel) {
+        await _initializeChatModel();
+      }
+    } catch (e) {
+      setState(() {
+        downloadStatus = 'Error: $e';
+      });
+      setModalState(() {
+        downloadStatus = 'Error: $e';
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error downloading model: $e')),
+        );
+      }
+    } finally {
+      setState(() {
+        isDownloadingModel = false;
+      });
+      setModalState(() {
+        isDownloadingModel = false;
+      });
+    }
+  }
+
+  void _showModelSelectionSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          // Store the setModalState for updates from parent
+          _modalStateSetter = setModalState;
+          return DraggableScrollableSheet(
+            initialChildSize: 0.7,
+            minChildSize: 0.5,
+            maxChildSize: 0.95,
+            expand: false,
+            builder: (context, scrollController) =>
+                _buildModelSelectionContent(scrollController, setModalState),
+          );
+        },
+      ),
+    ).whenComplete(() {
+      // Clear the reference when modal closes
+      _modalStateSetter = null;
+    });
+  }
+
+  Widget _buildModelSelectionContent(
+      ScrollController scrollController, StateSetter setModalState) {
+    // debugPrint('[NexusChat] Building model selection content');
+    // debugPrint(
+    //     '[NexusChat]   - Available models count: ${availableModels.length}');
+    // debugPrint(
+    //     '[NexusChat]   - Downloaded models count: ${downloadedModels.length}');
+    // debugPrint('[NexusChat]   - Current loaded model: $currentLoadedModel');
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 20),
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          Row(
+            children: [
+              const Text(
+                'Chat Model Settings',
+                style: TextStyle(
+                  color: Color(0xFF8CFF9E),
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.white70),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (currentLoadedModel != null)
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF8CFF9E).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: const Color(0xFF8CFF9E).withOpacity(0.3),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.check_circle,
+                    color: Color(0xFF8CFF9E),
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Currently loaded: $currentLoadedModel',
+                      style: const TextStyle(
+                        color: Color(0xFF8CFF9E),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: Colors.orange.withOpacity(0.3),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.warning,
+                    color: Colors.orange,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'No model loaded. Download and select a model below.',
+                      style: TextStyle(
+                        color: Colors.orange,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 20),
+          if (isDownloadingModel) ...[
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2A2A2A),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                              Color(0xFF8CFF9E)),
+                          value: downloadProgress,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              downloadStatus,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                              ),
+                            ),
+                            if (downloadProgress != null)
+                              Text(
+                                '${(downloadProgress! * 100).toStringAsFixed(1)}%',
+                                style: TextStyle(
+                                  color: Colors.white.withOpacity(0.6),
+                                  fontSize: 12,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+          const Text(
+            'Available Models',
+            style: TextStyle(
+              color: Colors.white70,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: availableModels.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const CircularProgressIndicator(
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(Color(0xFF8CFF9E)),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Loading available models...',
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.7),
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    controller: scrollController,
+                    itemCount: availableModels.length,
+                    itemBuilder: (context, index) {
+                      final model = availableModels[index];
+                      final isDownloaded =
+                          downloadedModels.contains(model.slug);
+                      final isSelected = model.slug == chatModel;
+                      final isLoaded = model.slug == currentLoadedModel;
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? const Color(0xFF8CFF9E).withOpacity(0.1)
+                              : const Color(0xFF2A2A2A),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: isSelected
+                                ? const Color(0xFF8CFF9E).withOpacity(0.5)
+                                : Colors.transparent,
+                            width: 2,
+                          ),
+                        ),
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
+                          title: Text(
+                            model.slug,
+                            style: TextStyle(
+                              color: isSelected
+                                  ? const Color(0xFF8CFF9E)
+                                  : Colors.white,
+                              fontWeight: isSelected
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                              fontSize: 15,
+                            ),
+                          ),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(height: 4),
+                              Text(
+                                '${model.sizeMb} MB',
+                                style: TextStyle(
+                                  color: Colors.white.withOpacity(0.6),
+                                  fontSize: 13,
+                                ),
+                              ),
+                              if (isLoaded)
+                                Container(
+                                  margin: const EdgeInsets.only(top: 6),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF8CFF9E),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text(
+                                    'ACTIVE',
+                                    style: TextStyle(
+                                      color: Colors.black,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                          trailing: isDownloaded
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (!isLoaded)
+                                      TextButton(
+                                        onPressed: () async {
+                                          setState(() {
+                                            chatModel = model.slug;
+                                          });
+                                          setModalState(() {
+                                            chatModel = model.slug;
+                                          });
+                                          await _saveModelPreference(
+                                              model.slug);
+                                          await _initializeChatModel();
+                                          setModalState(() {});
+                                          if (mounted) {
+                                            Navigator.pop(context);
+                                          }
+                                        },
+                                        child: const Text(
+                                          'Load',
+                                          style: TextStyle(
+                                            color: Color(0xFF8CFF9E),
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    Icon(
+                                      Icons.check_circle,
+                                      color: const Color(0xFF8CFF9E),
+                                      size: 24,
+                                    ),
+                                  ],
+                                )
+                              : ElevatedButton(
+                                  onPressed: isDownloadingModel
+                                      ? null
+                                      : () => _downloadModel(
+                                          model.slug, setModalState),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF8CFF9E),
+                                    foregroundColor: Colors.black,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
+                                    ),
+                                  ),
+                                  child: const Text('Download'),
+                                ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<List<double>> _generateEmbedding(String text) async {
@@ -353,6 +870,30 @@ class _NexusChatPageState extends State<NexusChatPage> {
         backgroundColor: const Color(0xFF1A1A1A),
         foregroundColor: const Color(0xFF8CFF9E),
         elevation: 0,
+        actions: [
+          IconButton(
+            icon: Stack(
+              children: [
+                const Icon(Icons.settings),
+                if (!isChatModelLoaded)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: const BoxDecoration(
+                        color: Colors.orange,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            onPressed: _showModelSelectionSheet,
+            tooltip: 'Model Settings',
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
