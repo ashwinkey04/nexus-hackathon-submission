@@ -1,8 +1,17 @@
 import 'package:cactus/cactus.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:read_pdf_text/read_pdf_text.dart';
+import 'dart:io';
+
+// Import the new widget components
+import '../widgets/nexus/nexus_top_bar.dart';
+import '../widgets/nexus/nexus_greeting.dart';
+import '../widgets/nexus/nexus_action_grid.dart';
+import '../widgets/nexus/nexus_recent_activity.dart';
+import '../widgets/nexus/nexus_nav_bar.dart';
+import '../widgets/nexus/manage_knowledge_sheet.dart';
+import '../widgets/nexus/paste_text_dialog.dart';
 
 class NexusHomePage extends StatefulWidget {
   const NexusHomePage({super.key});
@@ -35,7 +44,6 @@ class _NexusHomePageState extends State<NexusHomePage> {
   @override
   void initState() {
     super.initState();
-    // Auto-start initialization sequence
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startInitializationSequence();
     });
@@ -47,6 +55,8 @@ class _NexusHomePageState extends State<NexusHomePage> {
     rag.close();
     super.dispose();
   }
+
+  // --- RAG LOGIC STARTS HERE ---
 
   Future<void> _startInitializationSequence() async {
     await downloadModel();
@@ -63,7 +73,6 @@ class _NexusHomePageState extends State<NexusHomePage> {
       statusMessage = 'Downloading model...';
     });
     try {
-      // Check if already downloaded (optimization) - skipping for simple demo logic
       await lm.downloadModel(
         model: 'qwen3-0.6-embed',
         downloadProcessCallback: (progress, status, isError) {
@@ -111,7 +120,6 @@ class _NexusHomePageState extends State<NexusHomePage> {
         final result = await lm.generateEmbedding(text: text);
         return result.embeddings;
       });
-      // Updated chunking settings as per previous conversation
       rag.setChunking(chunkSize: 500, chunkOverlap: 50);
 
       setState(() {
@@ -138,14 +146,18 @@ class _NexusHomePageState extends State<NexusHomePage> {
     }
   }
 
-  Future<String> _getPDFtext(String path) async {
-    String text = "";
+  Future<String> _getFileContent(String path, String extension) async {
     try {
-      text = await ReadPdfText.getPDFtext(path);
-    } on PlatformException {
-      debugPrint('Failed to get PDF text.');
+      if (extension == 'pdf') {
+        return await ReadPdfText.getPDFtext(path);
+      } else {
+        final file = File(path);
+        return await file.readAsString();
+      }
+    } catch (e) {
+      debugPrint('Failed to get file text: $e');
+      return "";
     }
-    return text;
   }
 
   Future<void> addDocument() async {
@@ -159,15 +171,26 @@ class _NexusHomePageState extends State<NexusHomePage> {
 
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['pdf'], // Expand this later for other types
+        allowedExtensions: ['pdf', 'txt', 'md'],
       );
 
       if (result != null && result.files.single.path != null) {
         String filePath = result.files.single.path!;
         String fileName = result.files.single.name;
+        String extension = result.files.single.extension ?? 'txt';
 
-        // For now, only PDF logic is implemented
-        String text = await _getPDFtext(filePath);
+        String text = await _getFileContent(filePath, extension);
+
+        if (text.isEmpty) {
+          if (mounted)
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('Could not extract text from file')));
+          setState(() {
+            isBusy = false;
+            statusMessage = 'System Ready';
+          });
+          return;
+        }
 
         final document = await rag.storeDocument(
           fileName: fileName,
@@ -226,60 +249,81 @@ class _NexusHomePageState extends State<NexusHomePage> {
     }
   }
 
+  Future<void> _savePastedContent(String title, String content) async {
+    if (!isRAGInitialized) return;
+
+    try {
+      setState(() {
+        isBusy = true;
+        statusMessage = 'Saving text...';
+      });
+
+      final fileName = '$title.txt';
+
+      final document = await rag.storeDocument(
+        fileName: fileName,
+        filePath: 'manual_entry/$fileName',
+        content: content,
+        fileSize: content.length,
+      );
+
+      debugPrint('Stored manual doc: ${document.id}');
+      await getDBStats();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Added "$title" to knowledge base')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error saving text: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      }
+    } finally {
+      setState(() {
+        isBusy = false;
+        statusMessage = 'System Ready';
+      });
+    }
+  }
+
+  // --- UI HELPERS ---
+
+  void _showPasteTextDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => PasteTextDialog(
+        cardDark: _cardDark,
+        accentGreen: _accentGreen,
+        onSave: _savePastedContent,
+      ),
+    );
+  }
+
   void _showManageKnowledgeSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: _cardDark,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Manage Knowledge',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 20),
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                    color: _accentGreen.withOpacity(0.2),
-                    shape: BoxShape.circle),
-                child: Icon(Icons.add, color: _accentGreen),
-              ),
-              title: const Text('Add Document',
-                  style: TextStyle(color: Colors.white)),
-              subtitle: const Text('Upload PDF to knowledge base',
-                  style: TextStyle(color: Colors.grey)),
-              onTap: () {
-                Navigator.pop(ctx);
-                addDocument();
-              },
-            ),
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.2), shape: BoxShape.circle),
-                child: const Icon(Icons.delete_outline, color: Colors.red),
-              ),
-              title: const Text('Clear All Data',
-                  style: TextStyle(color: Colors.white)),
-              subtitle: const Text('Remove all documents',
-                  style: TextStyle(color: Colors.grey)),
-              onTap: () {
-                Navigator.pop(ctx);
-                clearKnowledgeBase();
-              },
-            ),
-          ],
-        ),
+      backgroundColor:
+          Colors.transparent, // Transparent to let sheet handle styling
+      isScrollControlled: true,
+      builder: (ctx) => ManageKnowledgeSheet(
+        cardDark: _cardDark,
+        accentGreen: _accentGreen,
+        accentPurple: _accentPurple,
+        onUploadTap: () {
+          Navigator.pop(ctx);
+          addDocument();
+        },
+        onPasteTap: () {
+          Navigator.pop(ctx);
+          _showPasteTextDialog();
+        },
+        onClearTap: () {
+          Navigator.pop(ctx);
+          clearKnowledgeBase();
+        },
       ),
     );
   }
@@ -295,243 +339,40 @@ class _NexusHomePageState extends State<NexusHomePage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: 10),
-              // Top Bar
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  CircleAvatar(
-                    backgroundColor: _cardDark,
-                    child: const Icon(Icons.menu, color: Colors.white),
-                  ),
-                  // Status Indicator
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: _cardDark,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                          color: isBusy
-                              ? Colors.amber
-                              : _accentGreen.withOpacity(0.5)),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: isBusy ? Colors.amber : _accentGreen,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          statusMessage,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 10),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const CircleAvatar(
-                    backgroundColor: Colors.grey,
-                    backgroundImage: NetworkImage(
-                        'https://i.pravatar.cc/150?img=11'), // Placeholder
-                    radius: 24,
-                  ),
-                ],
+              NexusTopBar(
+                isBusy: isBusy,
+                statusMessage: statusMessage,
+                cardDark: _cardDark,
+                accentGreen: _accentGreen,
               ),
               const SizedBox(height: 30),
-
-              // Greeting
-              const Text(
-                'Hello, User',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 28,
-                  fontWeight: FontWeight.w300,
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'How can I assist you right now?',
-                style: TextStyle(
-                  color: Colors.grey,
-                  fontSize: 16,
-                ),
+              const NexusGreeting(),
+              const SizedBox(height: 30),
+              NexusActionGrid(
+                accentGreen: _accentGreen,
+                accentPaleGreen: _accentPaleGreen,
+                accentPurple: _accentPurple,
+                onChatTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Chat feature coming soon!')),
+                  );
+                },
+                onSearchTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                        content: Text('Search feature coming soon!')),
+                  );
+                },
+                onManageTap: _showManageKnowledgeSheet,
               ),
               const SizedBox(height: 30),
-
-              // Action Grid
-              Row(
-                children: [
-                  // Big Left Card (Chat - Promoted)
-                  Expanded(
-                    flex: 1,
-                    child: GestureDetector(
-                      onTap: () {
-                        // Navigate to chat page (Placeholder for now)
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text('Chat feature coming soon!')),
-                        );
-                      },
-                      child: Container(
-                        height: 180,
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(
-                          color: _accentGreen,
-                          borderRadius: BorderRadius.circular(24),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.1),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(Icons.chat_bubble_outline,
-                                  color: Colors.black, size: 24),
-                            ),
-                            const Text(
-                              'Chat\nwith\nNexus',
-                              style: TextStyle(
-                                color: Colors.black,
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  // Right Column
-                  Expanded(
-                    flex: 1,
-                    child: Column(
-                      children: [
-                        // Top Right Card (Search)
-                        GestureDetector(
-                          onTap: () {
-                            // Navigate to search (Placeholder)
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                  content: Text('Search feature coming soon!')),
-                            );
-                          },
-                          child: Container(
-                            height: 82,
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: _accentPaleGreen,
-                              borderRadius: BorderRadius.circular(24),
-                            ),
-                            child: const Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Icon(Icons.search, color: Colors.black),
-                                Flexible(
-                                  child: Text(
-                                    'Search\nDocs',
-                                    textAlign: TextAlign.right,
-                                    style: TextStyle(
-                                      color: Colors.black,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        // Bottom Right Card (Manage Knowledge)
-                        GestureDetector(
-                          onTap: _showManageKnowledgeSheet,
-                          child: Container(
-                            height: 82,
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: _accentPurple,
-                              borderRadius: BorderRadius.circular(24),
-                            ),
-                            child: const Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Icon(Icons.edit_note, color: Colors.black),
-                                Flexible(
-                                  child: Text(
-                                    'Manage\nKnowledge',
-                                    textAlign: TextAlign.right,
-                                    style: TextStyle(
-                                      color: Colors.black,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 30),
-
-              // Recent Section Header
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Knowledge Base (${dbStats?.totalDocuments ?? 0} docs)',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () {},
-                    child: Text(
-                      'View All',
-                      style: TextStyle(color: _accentGreen),
-                    ),
-                  ),
-                ],
-              ),
-
-              // Recent List
               Expanded(
-                child: ListView(
-                  children: [
-                    if (dbStats != null && dbStats!.totalDocuments > 0)
-                      _buildRecentItem(
-                        icon: Icons.description_outlined,
-                        color: _accentPurple,
-                        title: 'Recent Document',
-                        subtitle: 'Tap "Manage Knowledge" to see all',
-                      )
-                    else
-                      Padding(
-                        padding: const EdgeInsets.only(top: 20.0),
-                        child: Text(
-                          'No documents yet. Add some!',
-                          style: TextStyle(color: Colors.grey[600]),
-                        ),
-                      )
-                  ],
+                child: NexusRecentActivity(
+                  dbStats: dbStats,
+                  cardDark: _cardDark,
+                  accentPurple: _accentPurple,
+                  accentGreen: _accentGreen,
+                  onViewAllTap: () {},
                 ),
               ),
             ],
@@ -576,90 +417,14 @@ class _NexusHomePageState extends State<NexusHomePage> {
       // Bottom Nav Bar
       bottomNavigationBar: ClipRRect(
         borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
-        child: BottomAppBar(
-          color: _cardDark,
-          shape: const CircularNotchedRectangle(),
-          notchMargin: 8,
-          child: SizedBox(
-            height: 60,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                IconButton(
-                  icon: Icon(Icons.home_filled,
-                      color: _selectedIndex == 0 ? _accentGreen : Colors.grey),
-                  onPressed: () => setState(() => _selectedIndex = 0),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.search, color: Colors.grey),
-                  onPressed: () => setState(() => _selectedIndex = 1),
-                ),
-                const SizedBox(width: 40), // Space for FAB
-                IconButton(
-                  icon:
-                      const Icon(Icons.chat_bubble_outline, color: Colors.grey),
-                  onPressed: () => setState(() => _selectedIndex = 2),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.person_outline, color: Colors.grey),
-                  onPressed: () => setState(() => _selectedIndex = 3),
-                ),
-              ],
-            ),
-          ),
+        child: NexusNavBar(
+          selectedIndex: _selectedIndex,
+          onIndexChanged: (index) => setState(() => _selectedIndex = index),
+          onFabTap: () {}, // FAB is handled above
+          isBusy: isBusy,
+          cardDark: _cardDark,
+          accentGreen: _accentGreen,
         ),
-      ),
-    );
-  }
-
-  Widget _buildRecentItem({
-    required IconData icon,
-    required Color color,
-    required String title,
-    required String subtitle,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: _cardDark,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.2),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(icon, color: color, size: 20),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  subtitle,
-                  style: TextStyle(
-                    color: Colors.grey.shade500,
-                    fontSize: 12,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Icon(Icons.more_horiz, color: Colors.grey.shade600),
-        ],
       ),
     );
   }
