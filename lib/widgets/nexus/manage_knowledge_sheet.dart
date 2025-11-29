@@ -7,6 +7,8 @@ class ManageKnowledgeSheet extends StatelessWidget {
   final VoidCallback onUploadTap;
   final VoidCallback onPasteTap;
   final VoidCallback onClearTap;
+  final VoidCallback onLoadDemoDataTap;
+  final VoidCallback onReloadDemoDataTap;
 
   const ManageKnowledgeSheet({
     super.key,
@@ -16,6 +18,8 @@ class ManageKnowledgeSheet extends StatelessWidget {
     required this.onUploadTap,
     required this.onPasteTap,
     required this.onClearTap,
+    required this.onLoadDemoDataTap,
+    required this.onReloadDemoDataTap,
   });
 
   @override
@@ -60,6 +64,32 @@ class ManageKnowledgeSheet extends StatelessWidget {
             subtitle: const Text('Manually add content',
                 style: TextStyle(color: Colors.grey)),
             onTap: onPasteTap,
+          ),
+          ListTile(
+            leading: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.2), shape: BoxShape.circle),
+              child: const Icon(Icons.cloud_download, color: Colors.blueAccent),
+            ),
+            title: const Text('Load Demo Data',
+                style: TextStyle(color: Colors.white)),
+            subtitle: const Text('Load sample LinkedIn posts (cached locally)',
+                style: TextStyle(color: Colors.grey)),
+            onTap: onLoadDemoDataTap,
+          ),
+          ListTile(
+            leading: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.2), shape: BoxShape.circle),
+              child: const Icon(Icons.refresh, color: Colors.orangeAccent),
+            ),
+            title: const Text('Reload Demo Data',
+                style: TextStyle(color: Colors.white)),
+            subtitle: const Text('Force refresh from API',
+                style: TextStyle(color: Colors.grey)),
+            onTap: onReloadDemoDataTap,
           ),
           ListTile(
             leading: Container(

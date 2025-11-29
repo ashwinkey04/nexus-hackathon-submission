@@ -13,6 +13,13 @@ import '../widgets/nexus/nexus_nav_bar.dart';
 import '../widgets/nexus/manage_knowledge_sheet.dart';
 import '../widgets/nexus/paste_text_dialog.dart';
 
+// Import demo data service
+import '../services/demo_data_service.dart';
+
+// Import chat page
+import 'nexus_chat.dart';
+import 'nexus_search.dart';
+
 class NexusHomePage extends StatefulWidget {
   const NexusHomePage({super.key});
 
@@ -33,6 +40,7 @@ class _NexusHomePageState extends State<NexusHomePage> {
   // Cactus RAG State
   final lm = CactusLM();
   final rag = CactusRAG();
+  final demoDataService = DemoDataService();
 
   bool isModelDownloaded = false;
   bool isModelLoaded = false;
@@ -289,6 +297,159 @@ class _NexusHomePageState extends State<NexusHomePage> {
     }
   }
 
+  Future<bool> _checkIfDemoDataExists() async {
+    debugPrint('[NexusHome] Checking if demo data already exists...');
+    try {
+      final allDocs = await rag.getAllDocuments();
+      // Check if any documents have the demo_data prefix in their file path
+      final demoDataCount =
+          allDocs.where((doc) => doc.filePath.startsWith('demo_data/')).length;
+      debugPrint(
+          '[NexusHome] Found $demoDataCount demo data documents in database');
+      return demoDataCount > 0;
+    } catch (e) {
+      debugPrint('[NexusHome] Error checking for demo data: $e');
+      return false;
+    }
+  }
+
+  Future<void> loadDemoData({bool forceReload = false}) async {
+    debugPrint('[NexusHome] loadDemoData() called (forceReload: $forceReload)');
+
+    if (!isRAGInitialized) {
+      debugPrint(
+          '[NexusHome] ERROR: RAG not initialized, cannot load demo data');
+      return;
+    }
+
+    debugPrint('[NexusHome] RAG initialized, proceeding with demo data load');
+
+    try {
+      setState(() {
+        isBusy = true;
+        statusMessage = 'Checking existing data...';
+      });
+
+      // Check if demo data already exists
+      if (!forceReload) {
+        final exists = await _checkIfDemoDataExists();
+        if (exists) {
+          debugPrint('[NexusHome] Demo data already exists, skipping load');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Demo data already loaded! No need to reload.'),
+                duration: Duration(seconds: 3),
+              ),
+            );
+          }
+          setState(() {
+            isBusy = false;
+            statusMessage = 'System Ready';
+          });
+          return;
+        }
+      } else {
+        debugPrint(
+            '[NexusHome] Force reload requested, clearing existing demo data...');
+        // Clear existing demo data
+        final allDocs = await rag.getAllDocuments();
+        final demoDocs =
+            allDocs.where((doc) => doc.filePath.startsWith('demo_data/'));
+        for (final doc in demoDocs) {
+          await rag.deleteDocument(doc.id);
+          debugPrint(
+              '[NexusHome] Deleted existing demo document: ${doc.fileName}');
+        }
+      }
+
+      setState(() {
+        statusMessage = 'Loading demo data...';
+      });
+
+      debugPrint('[NexusHome] Fetching demo data from API...');
+      final stopwatch = Stopwatch()..start();
+      final posts = await demoDataService.fetchDemoData();
+      stopwatch.stop();
+      debugPrint(
+          '[NexusHome] Fetched ${posts.length} posts in ${stopwatch.elapsedMilliseconds}ms');
+
+      int successCount = 0;
+      int failureCount = 0;
+
+      debugPrint(
+          '[NexusHome] Starting to store ${posts.length} posts in RAG database...');
+      final storeStopwatch = Stopwatch()..start();
+
+      for (int i = 0; i < posts.length; i++) {
+        final post = posts[i];
+        try {
+          debugPrint(
+              '[NexusHome] Processing post ${i + 1}/${posts.length}: ${post.displayName}');
+          final content = post.toSearchableContent();
+          debugPrint(
+              '[NexusHome]   - Content length: ${content.length} characters');
+
+          final doc = await rag.storeDocument(
+            fileName: post.displayName,
+            filePath: 'demo_data/${post.url}',
+            content: content,
+            fileSize: content.length,
+          );
+
+          debugPrint(
+              '[NexusHome]   - Successfully stored document ID: ${doc.id}');
+          successCount++;
+        } catch (e, stackTrace) {
+          debugPrint(
+              '[NexusHome] ERROR storing post ${i + 1} (${post.url}): $e');
+          debugPrint('[NexusHome] Stack trace: $stackTrace');
+          failureCount++;
+        }
+      }
+
+      storeStopwatch.stop();
+      debugPrint(
+          '[NexusHome] Storage complete: $successCount successful, $failureCount failed');
+      debugPrint(
+          '[NexusHome] Total storage time: ${storeStopwatch.elapsedMilliseconds}ms');
+
+      debugPrint('[NexusHome] Updating database statistics...');
+      await getDBStats();
+      debugPrint(
+          '[NexusHome] Database stats updated: ${dbStats?.totalDocuments} total documents');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(forceReload
+                ? 'Reloaded $successCount LinkedIn posts'
+                : 'Loaded $successCount LinkedIn posts into knowledge base'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+
+      debugPrint('[NexusHome] Demo data loading completed successfully');
+      debugPrint(
+          '[NexusHome] Demo data is now persisted locally and will survive app restarts');
+    } catch (e, stackTrace) {
+      debugPrint('[NexusHome] ERROR loading demo data: $e');
+      debugPrint('[NexusHome] Stack trace: $stackTrace');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading demo data: $e')),
+        );
+      }
+    } finally {
+      setState(() {
+        isBusy = false;
+        statusMessage = 'System Ready';
+      });
+      debugPrint('[NexusHome] loadDemoData() finished, isBusy set to false');
+    }
+  }
+
   // --- UI HELPERS ---
 
   void _showPasteTextDialog() {
@@ -319,6 +480,14 @@ class _NexusHomePageState extends State<NexusHomePage> {
         onPasteTap: () {
           Navigator.pop(ctx);
           _showPasteTextDialog();
+        },
+        onLoadDemoDataTap: () {
+          Navigator.pop(ctx);
+          loadDemoData(forceReload: false);
+        },
+        onReloadDemoDataTap: () {
+          Navigator.pop(ctx);
+          loadDemoData(forceReload: true);
         },
         onClearTap: () {
           Navigator.pop(ctx);
@@ -353,14 +522,38 @@ class _NexusHomePageState extends State<NexusHomePage> {
                 accentPaleGreen: _accentPaleGreen,
                 accentPurple: _accentPurple,
                 onChatTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Chat feature coming soon!')),
+                  if (!isRAGInitialized || !isModelLoaded) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Please wait for system to initialize'),
+                      ),
+                    );
+                    return;
+                  }
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => NexusChatPage(
+                        lm: lm,
+                        rag: rag,
+                      ),
+                    ),
                   );
                 },
                 onSearchTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                        content: Text('Search feature coming soon!')),
+                  if (!isRAGInitialized) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Please wait for system to initialize'),
+                      ),
+                    );
+                    return;
+                  }
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => NexusSearchPage(rag: rag),
+                    ),
                   );
                 },
                 onManageTap: _showManageKnowledgeSheet,
