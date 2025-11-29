@@ -48,6 +48,7 @@ class _NexusHomePageState extends State<NexusHomePage> {
   bool isBusy = false;
   String statusMessage = 'Initializing system...';
   DatabaseStats? dbStats;
+  List<Document> recentDocuments = [];
 
   @override
   void initState() {
@@ -144,13 +145,26 @@ class _NexusHomePageState extends State<NexusHomePage> {
   }
 
   Future<void> getDBStats() async {
+    debugPrint('[NexusHome] Getting database statistics...');
     try {
       final stats = await rag.getStats();
+      final allDocs = await rag.getAllDocuments();
+
+      // Sort by ID descending (most recent first) and take top 5
+      allDocs.sort((a, b) => b.id.compareTo(a.id));
+
       setState(() {
         dbStats = stats;
+        recentDocuments = allDocs.take(5).toList();
       });
-    } catch (e) {
-      debugPrint('Stats error: $e');
+
+      debugPrint('[NexusHome] Database stats updated:');
+      debugPrint('[NexusHome]   - Total documents: ${stats.totalDocuments}');
+      debugPrint(
+          '[NexusHome]   - Recent documents loaded: ${recentDocuments.length}');
+    } catch (e, stackTrace) {
+      debugPrint('[NexusHome] ERROR getting database stats: $e');
+      debugPrint('[NexusHome] Stack trace: $stackTrace');
     }
   }
 
@@ -562,10 +576,18 @@ class _NexusHomePageState extends State<NexusHomePage> {
               Expanded(
                 child: NexusRecentActivity(
                   dbStats: dbStats,
+                  recentDocuments: recentDocuments,
                   cardDark: _cardDark,
                   accentPurple: _accentPurple,
                   accentGreen: _accentGreen,
-                  onViewAllTap: () {},
+                  onViewAllTap: () {
+                    // TODO: Navigate to full documents list
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Full documents view coming soon!'),
+                      ),
+                    );
+                  },
                 ),
               ),
             ],

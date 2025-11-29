@@ -1,4 +1,4 @@
-package com.cactus.example
+package com.atlasprods.nexus
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -26,6 +26,10 @@ class _NexusChatPageState extends State<NexusChatPage> {
   String chatModel = 'qwen3-0.6';
   String? currentLoadedModel;
 
+  // Processing steps tracking
+  final List<ProcessingStep> _processingSteps = [];
+  bool _showProcessingSteps = true;
+
   @override
   void initState() {
     super.initState();
@@ -129,6 +133,16 @@ class _NexusChatPageState extends State<NexusChatPage> {
     return result.embeddings;
   }
 
+  void _addProcessingStep(String step, {String? detail}) {
+    setState(() {
+      _processingSteps.add(ProcessingStep(
+        step: step,
+        detail: detail,
+        timestamp: DateTime.now(),
+      ));
+    });
+  }
+
   Future<void> _sendMessage() async {
     if (_messageController.text.trim().isEmpty || isGenerating) {
       debugPrint(
@@ -151,6 +165,7 @@ class _NexusChatPageState extends State<NexusChatPage> {
         timestamp: DateTime.now(),
       ));
       isGenerating = true;
+      _processingSteps.clear();
     });
 
     _scrollToBottom();
@@ -158,6 +173,7 @@ class _NexusChatPageState extends State<NexusChatPage> {
     try {
       // Step 1: Search RAG for relevant context
       debugPrint('[NexusChat] Step 1: Searching RAG for relevant context...');
+      _addProcessingStep('🔄 Generating embedding for query...');
       widget.rag.setEmbeddingGenerator((text) => _generateEmbedding(text));
 
       final searchStopwatch = Stopwatch()..start();
@@ -171,6 +187,12 @@ class _NexusChatPageState extends State<NexusChatPage> {
           '[NexusChat] RAG search completed in ${searchStopwatch.elapsedMilliseconds}ms');
       debugPrint('[NexusChat] Found ${searchResults.length} relevant chunks');
 
+      _addProcessingStep(
+        '✅ RAG search completed',
+        detail:
+            'Found ${searchResults.length} relevant chunks in ${(searchStopwatch.elapsedMilliseconds / 1000).toStringAsFixed(2)}s',
+      );
+
       // Step 2: Build context from search results
       String context = '';
       List<String> sources = [];
@@ -178,6 +200,8 @@ class _NexusChatPageState extends State<NexusChatPage> {
       if (searchResults.isNotEmpty) {
         debugPrint(
             '[NexusChat] Step 2: Building context from search results...');
+        _addProcessingStep('📚 Building context from retrieved chunks...');
+
         context = 'Here is relevant information from the knowledge base:\n\n';
         for (int i = 0; i < searchResults.length; i++) {
           final result = searchResults[i];
@@ -190,15 +214,27 @@ class _NexusChatPageState extends State<NexusChatPage> {
           context += '--- Source ${i + 1}: $docName ---\n';
           context += '${result.chunk.content}\n\n';
           sources.add(docName);
+
+          _addProcessingStep(
+            '  📄 Chunk ${i + 1}: $docName',
+            detail: 'Similarity: $similarity%',
+          );
         }
         debugPrint('[NexusChat] Context built: ${context.length} characters');
+        _addProcessingStep(
+          '✅ Context built',
+          detail: '${context.length} characters from ${sources.length} sources',
+        );
       } else {
         debugPrint(
             '[NexusChat] No relevant chunks found, proceeding without context');
+        _addProcessingStep('ℹ️ No relevant chunks found in knowledge base');
       }
 
       // Step 3: Build messages for LLM
       debugPrint('[NexusChat] Step 3: Building messages for LLM...');
+      _addProcessingStep('🔧 Building prompt with context...');
+
       final messages = [
         ChatMessage(
           content:
@@ -221,8 +257,15 @@ class _NexusChatPageState extends State<NexusChatPage> {
       debugPrint(
           '[NexusChat]   - Assistant messages: ${messages.where((m) => m.role == 'assistant').length}');
 
+      _addProcessingStep(
+        '✅ Prompt built',
+        detail: '${messages.length} messages total',
+      );
+
       // Step 4: Generate response
       debugPrint('[NexusChat] Step 4: Generating LLM response...');
+      _addProcessingStep('🤖 Generating response with LLM...');
+
       final generateStopwatch = Stopwatch()..start();
       final response = await widget.lm.generateCompletion(
         messages: messages,
@@ -243,6 +286,12 @@ class _NexusChatPageState extends State<NexusChatPage> {
         debugPrint(
             '[NexusChat] Time to first token: ${response.timeToFirstTokenMs}ms');
       }
+
+      _addProcessingStep(
+        '✅ Response generated',
+        detail:
+            '${response.response.length} characters in ${(generateStopwatch.elapsedMilliseconds / 1000).toStringAsFixed(2)}s • ${response.tokensPerSecond.toStringAsFixed(1)} tokens/s',
+      );
 
       if (response.success && mounted) {
         setState(() {
@@ -305,96 +354,100 @@ class _NexusChatPageState extends State<NexusChatPage> {
         foregroundColor: const Color(0xFF8CFF9E),
         elevation: 0,
       ),
-      body: Column(
-        children: [
-          if (isLoadingChatModel)
-            Container(
-              padding: const EdgeInsets.all(16),
-              color: const Color(0xFF1A1A1A),
-              child: const Row(
-                children: [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor:
-                          AlwaysStoppedAnimation<Color>(Color(0xFF8CFF9E)),
+      body: SafeArea(
+        child: Column(
+          children: [
+            if (isLoadingChatModel)
+              Container(
+                padding: const EdgeInsets.all(16),
+                color: const Color(0xFF1A1A1A),
+                child: const Row(
+                  children: [
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(Color(0xFF8CFF9E)),
+                      ),
                     ),
-                  ),
-                  SizedBox(width: 12),
-                  Text(
-                    'Loading chat model...',
-                    style: TextStyle(color: Colors.white70),
-                  ),
-                ],
+                    SizedBox(width: 12),
+                    Text(
+                      'Loading chat model...',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  ],
+                ),
               ),
+            Expanded(
+              child: _messages.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.chat_bubble_outline,
+                            size: 64,
+                            color: const Color(0xFF8CFF9E).withOpacity(0.3),
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'Start a conversation with Nexus',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 16,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Ask questions about your knowledge base',
+                            style: TextStyle(
+                              color: Colors.white38,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.all(16),
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) {
+                        final message = _messages[index];
+                        return _buildMessageBubble(message);
+                      },
+                    ),
             ),
-          Expanded(
-            child: _messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.chat_bubble_outline,
-                          size: 64,
-                          color: const Color(0xFF8CFF9E).withOpacity(0.3),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Start a conversation with Nexus',
-                          style: TextStyle(
-                            color: Colors.white54,
-                            fontSize: 16,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Ask questions about your knowledge base',
-                          style: TextStyle(
-                            color: Colors.white38,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
+            if (_processingSteps.isNotEmpty) _buildProcessingSteps(),
+            if (isGenerating)
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                color: const Color(0xFF1A1A1A),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                            Color(0xFF8CFF9E)),
+                      ),
                     ),
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final message = _messages[index];
-                      return _buildMessageBubble(message);
-                    },
-                  ),
-          ),
-          if (isGenerating)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              color: const Color(0xFF1A1A1A),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: const AlwaysStoppedAnimation<Color>(
-                          Color(0xFF8CFF9E)),
+                    const SizedBox(width: 12),
+                    const Text(
+                      'Nexus is thinking...',
+                      style: TextStyle(color: Colors.white70, fontSize: 14),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  const Text(
-                    'Nexus is thinking...',
-                    style: TextStyle(color: Colors.white70, fontSize: 14),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          _buildInputArea(),
-        ],
+            _buildInputArea(),
+          ],
+        ),
       ),
     );
   }
@@ -416,12 +469,9 @@ class _NexusChatPageState extends State<NexusChatPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              message.content,
-              style: TextStyle(
-                color: isUser ? Colors.black : Colors.white,
-                fontSize: 15,
-              ),
+            _MessageContentWidget(
+              content: message.content,
+              isUser: isUser,
             ),
             if (message.sources != null && message.sources!.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -450,6 +500,107 @@ class _NexusChatPageState extends State<NexusChatPage> {
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildProcessingSteps() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: const Color(0xFF8CFF9E).withOpacity(0.3),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            onTap: () {
+              setState(() {
+                _showProcessingSteps = !_showProcessingSteps;
+              });
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  Icon(
+                    _showProcessingSteps
+                        ? Icons.expand_less
+                        : Icons.expand_more,
+                    color: const Color(0xFF8CFF9E),
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Processing Steps',
+                    style: TextStyle(
+                      color: Color(0xFF8CFF9E),
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (isGenerating)
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                            Color(0xFF8CFF9E)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (_showProcessingSteps) ...[
+            const Divider(
+              color: Color(0xFF2A2A2A),
+              height: 1,
+            ),
+            Container(
+              constraints: const BoxConstraints(maxHeight: 200),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: _processingSteps.map((step) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            step.step,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                            ),
+                          ),
+                          if (step.detail != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              step.detail!,
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.6),
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -527,5 +678,224 @@ class ChatMessageModel {
     required this.role,
     required this.timestamp,
     this.sources,
+  });
+}
+
+class ProcessingStep {
+  final String step;
+  final String? detail;
+  final DateTime timestamp;
+
+  ProcessingStep({
+    required this.step,
+    this.detail,
+    required this.timestamp,
+  });
+}
+
+class _MessageContentWidget extends StatefulWidget {
+  final String content;
+  final bool isUser;
+
+  const _MessageContentWidget({
+    required this.content,
+    required this.isUser,
+  });
+
+  @override
+  State<_MessageContentWidget> createState() => _MessageContentWidgetState();
+}
+
+class _MessageContentWidgetState extends State<_MessageContentWidget> {
+  final List<bool> _expandedThinkBlocks = [];
+
+  @override
+  Widget build(BuildContext context) {
+    final parsedContent = _parseContent(widget.content);
+
+    // Initialize expanded states if needed
+    if (_expandedThinkBlocks.length != parsedContent.thinkBlocks.length) {
+      _expandedThinkBlocks.clear();
+      _expandedThinkBlocks.addAll(
+        List.filled(parsedContent.thinkBlocks.length, false),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (int i = 0; i < parsedContent.segments.length; i++) ...[
+          if (parsedContent.segments[i].isThinkBlock)
+            _buildThinkBlock(
+              parsedContent.segments[i].content,
+              parsedContent.segments[i].thinkIndex!,
+            )
+          else if (parsedContent.segments[i].content.trim().isNotEmpty)
+            Text(
+              parsedContent.segments[i].content,
+              style: TextStyle(
+                color: widget.isUser ? Colors.black : Colors.white,
+                fontSize: 15,
+              ),
+            ),
+          if (i < parsedContent.segments.length - 1 &&
+              parsedContent.segments[i].content.trim().isNotEmpty)
+            const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildThinkBlock(String content, int index) {
+    final isExpanded = _expandedThinkBlocks[index];
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      decoration: BoxDecoration(
+        color: widget.isUser
+            ? Colors.black.withOpacity(0.1)
+            : Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: widget.isUser
+              ? Colors.black.withOpacity(0.2)
+              : const Color(0xFF8CFF9E).withOpacity(0.3),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: () {
+              setState(() {
+                _expandedThinkBlocks[index] = !_expandedThinkBlocks[index];
+              });
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  Icon(
+                    isExpanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: widget.isUser
+                        ? Colors.black.withOpacity(0.6)
+                        : const Color(0xFF8CFF9E).withOpacity(0.8),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '💭 Thinking process',
+                    style: TextStyle(
+                      color: widget.isUser
+                          ? Colors.black.withOpacity(0.7)
+                          : const Color(0xFF8CFF9E).withOpacity(0.9),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (isExpanded) ...[
+            Divider(
+              color: widget.isUser
+                  ? Colors.black.withOpacity(0.1)
+                  : Colors.white.withOpacity(0.1),
+              height: 1,
+            ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                content,
+                style: TextStyle(
+                  color: widget.isUser
+                      ? Colors.black.withOpacity(0.7)
+                      : Colors.white.withOpacity(0.8),
+                  fontSize: 13,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  _ParsedContent _parseContent(String content) {
+    final segments = <_ContentSegment>[];
+    final thinkBlocks = <String>[];
+
+    // Regular expression to match <think>...</think> blocks
+    final thinkRegex = RegExp(r'<think>([\s\S]*?)<\/think>', multiLine: true);
+
+    int lastEnd = 0;
+    int thinkIndex = 0;
+
+    for (final match in thinkRegex.allMatches(content)) {
+      // Add text before the think block
+      if (match.start > lastEnd) {
+        final beforeText = content.substring(lastEnd, match.start);
+        segments.add(_ContentSegment(
+          content: beforeText,
+          isThinkBlock: false,
+        ));
+      }
+
+      // Add the think block
+      final thinkContent = match.group(1)?.trim() ?? '';
+      thinkBlocks.add(thinkContent);
+      segments.add(_ContentSegment(
+        content: thinkContent,
+        isThinkBlock: true,
+        thinkIndex: thinkIndex,
+      ));
+      thinkIndex++;
+
+      lastEnd = match.end;
+    }
+
+    // Add remaining text after the last think block
+    if (lastEnd < content.length) {
+      final remainingText = content.substring(lastEnd);
+      segments.add(_ContentSegment(
+        content: remainingText,
+        isThinkBlock: false,
+      ));
+    }
+
+    // If no think blocks were found, return the entire content as a single segment
+    if (segments.isEmpty) {
+      segments.add(_ContentSegment(
+        content: content,
+        isThinkBlock: false,
+      ));
+    }
+
+    return _ParsedContent(segments: segments, thinkBlocks: thinkBlocks);
+  }
+}
+
+class _ContentSegment {
+  final String content;
+  final bool isThinkBlock;
+  final int? thinkIndex;
+
+  _ContentSegment({
+    required this.content,
+    required this.isThinkBlock,
+    this.thinkIndex,
+  });
+}
+
+class _ParsedContent {
+  final List<_ContentSegment> segments;
+  final List<String> thinkBlocks;
+
+  _ParsedContent({
+    required this.segments,
+    required this.thinkBlocks,
   });
 }
